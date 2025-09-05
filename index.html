@@ -9,6 +9,8 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css"/>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.awesome-markers/2.0.4/leaflet.awesome-markers.css"/>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css"/>
+<!-- Draw tools -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
 <style>
   html, body, #map { height: 100%; margin: 0; }
   .leaflet-control-layers-overlays label { font-weight: 500; }
@@ -21,6 +23,8 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.awesome-markers/2.0.4/leaflet.awesome-markers.js"></script>
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+<script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 <script>
   // --- Base map
   var map = L.map('map', { zoomControl: true }).setView([39.5, -8.0], 6);
@@ -39,7 +43,7 @@
     return 'hsl(' + hue.toFixed(0) + ',70%,' + (lightness||40) + '%)';
   }
 
-  // Zoom-aware, log-sized badge (slightly bigger at national view)
+  // Zoom-aware, log-sized badge (your tuning)
   function sizedBadgeHTML(value, smin, smax) {
     var t  = tFromValue(value, smin, smax);
     var bg = hslGreenToRed(t, 40);
@@ -100,13 +104,11 @@
 
       var cluster = L.markerClusterGroup({
         chunkedLoading: true,
-        // Middle-ground breakup:
-        // Larger radius than last time so clusters hold together longer.
+        // YOUR tuning: break up later, hold clusters longer
         maxClusterRadius: function (zoom) {
-          // z=6 -> ~38px, z=10 -> ~30px, never below 24px
+          // z=6 ~49px, z=10 ~39px; never below 30px
           return Math.max(30, 64 - (zoom * 2.5));
         },
-        // Keep clustering one extra level (break later)
         disableClusteringAtZoom: 13,
         spiderfyOnMaxZoom: true,
         showCoverageOnHover: false,
@@ -209,7 +211,7 @@
 
   var control = L.control.layers(null, overlays, { collapsed: false }).addTo(map);
 
-  // tag each overlay with its label so we can detect which was toggled
+  // Tag each overlay with its label so we can detect which was toggled
   Object.entries(overlays).forEach(function(entry) {
     var lbl = entry[0], lg = entry[1];
     lg._label = lbl;
@@ -231,6 +233,91 @@
     if (lbl === 'Warehouses' && whLayers['existing']) map.removeLayer(whLayers['existing']);
     else if (lbl === 'New Warehouses' && whLayers['new']) map.removeLayer(whLayers['new']);
     else if (dataLayers[lbl]) map.removeLayer(dataLayers[lbl]);
+  });
+
+  // =========================
+  // Draw-to-aggregate feature
+  // =========================
+
+  // Selection layer (for shapes + aggregate badges)
+  var selections = L.featureGroup().addTo(map);
+
+  // Draw tools (polygon / rectangle / circle)
+  var drawControl = new L.Control.Draw({
+    edit: { featureGroup: selections, edit: false, remove: true },
+    draw: {
+      polyline: false,
+      marker: false,
+      circlemarker: false,
+      polygon: { allowIntersection: false, showArea: false },
+      rectangle: true,
+      circle: true
+    }
+  });
+  map.addControl(drawControl);
+
+  // Helper to create an aggregated badge using a dataset's range if available
+  function makeAggregateBadge(sum, labelForRange) {
+    var rng = dataRanges[labelForRange] || { smin: 0, smax: Math.max(1, sum) };
+    var badge = sizedBadgeHTML(sum, rng.smin, rng.smax);
+    return L.divIcon({
+      html: badge.html,
+      iconSize: [badge.size, badge.size],
+      iconAnchor: [badge.size/2, badge.size/2],
+      className: 'qty-badge'
+    });
+  }
+
+  // When a shape is drawn: sum all visible leaf markers inside and drop one badge
+  map.on(L.Draw.Event.CREATED, function (e) {
+    var shape = e.layer;
+    selections.addLayer(shape);
+
+    // Convert shape to polygon geometry for Turf
+    var geom;
+    if (e.layerType === 'circle') {
+      var c = shape.getLatLng(), r_m = shape.getRadius();
+      geom = turf.circle([c.lng, c.lat], r_m / 1000, { steps: 64, units: 'kilometers' }).geometry;
+    } else {
+      geom = shape.toGeoJSON().geometry;
+    }
+
+    // Gather points from visible dataset layers (first visible label sets the range)
+    var activeLabel = null;
+    var points = [];
+    Object.keys(dataLayers).forEach(function (lbl) {
+      var group = dataLayers[lbl];
+      if (group && map.hasLayer(group)) {
+        if (!activeLabel) activeLabel = lbl;
+        group.eachLayer(function (layer) {
+          if (layer instanceof L.Marker && layer.options && layer.options.title) {
+            var latlng = layer.getLatLng();
+            var pt = turf.point([latlng.lng, latlng.lat]);
+            if (turf.booleanPointInPolygon(pt, geom)) {
+              var qty = parseFloat(layer.options.title) || 0;
+              points.push({ lng: latlng.lng, lat: latlng.lat, qty: qty });
+            }
+          }
+        });
+      }
+    });
+
+    if (points.length === 0) {
+      shape.bindPopup('No postcodes in selection').openPopup();
+      return;
+    }
+
+    var total = points.reduce(function(a, p) { return a + p.qty; }, 0);
+    var centroid = turf.centroid(geom).geometry.coordinates; // [lng, lat]
+    var badgeIcon = makeAggregateBadge(total, activeLabel || Object.keys(dataRanges)[0]);
+
+    var badgeMarker = L.marker([centroid[1], centroid[0]], { icon: badgeIcon })
+                      .bindTooltip('Total: ' + Math.round(total).toLocaleString(), { direction: 'top', opacity: 0.9 });
+
+    selections.addLayer(badgeMarker);
+
+    shape.bindPopup('Selected bubbles: ' + points.length + '<br>Total qty: <b>' +
+                    Math.round(total).toLocaleString() + '</b>').openPopup();
   });
 </script>
 </body>
