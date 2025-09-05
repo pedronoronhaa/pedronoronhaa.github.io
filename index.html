@@ -7,12 +7,12 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.css"/>
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css"/>
-<!-- AwesomeMarkers + Font Awesome for colored warehouse pins -->
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.awesome-markers/2.0.4/leaflet.awesome-markers.css"/>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css"/>
 <style>
   html, body, #map { height: 100%; margin: 0; }
   .leaflet-control-layers-overlays label { font-weight: 500; }
+  .qty-badge { pointer-events: auto; }
 </style>
 </head>
 <body>
@@ -35,16 +35,53 @@
     return Math.max(0, Math.min(1, t));
   }
   function hslGreenToRed(t, lightness) {
-    var hue = 120 * (1 - t);                 // 120=green -> 0=red
+    var hue = 120 * (1 - t); // 120=green -> 0=red
     return 'hsl(' + hue.toFixed(0) + ',70%,' + (lightness||40) + '%)';
+  }
+
+  // Zoom-aware, log-sized badge (slightly bigger at national view)
+  function sizedBadgeHTML(value, smin, smax) {
+    var t  = tFromValue(value, smin, smax);
+    var bg = hslGreenToRed(t, 40);
+    var br = hslGreenToRed(t, 30);
+
+    // Base size by value (gentle log spread)
+    var base = Math.round(14 + 7 * Math.log((value||0) + 1)); // px
+    base = Math.max(22, Math.min(64, base));                  // clamp base
+
+    // Zoom attenuation:
+    // gentler shrink and higher floor so national-view bubbles are a bit bigger
+    var z = map.getZoom ? map.getZoom() : 6;
+    var zoomScale;
+    if (z >= 12) {
+      zoomScale = 1.0;
+    } else {
+      zoomScale = Math.pow(0.90, (12 - z)); // gentler than 0.88
+      zoomScale = Math.max(0.62, zoomScale); // bigger floor at far zoom
+    }
+
+    var size = Math.round(base * zoomScale);
+    size = Math.max(20, Math.min(72, size)); // final clamp
+
+    return {
+      html:
+        '<div style="background:'+bg+';border:2px solid '+br+';color:white;'
+      + 'display:flex;align-items:center;justify-content:center;'
+      + 'width:'+size+'px;height:'+size+'px;border-radius:'+(size/2)+'px;'
+      + 'font-weight:700;font-size:13px;line-height:1;">'
+      + (value||0).toLocaleString() + '</div>',
+      size: size
+    };
   }
 
   // --- Lazy layers
   var datasetFiles = {"Nov 2024": "nov_2024.json", "Dec 2024": "dec_2024.json", "Jul 2025": "jul_2025.json"};   // label -> json file
   var dataLayers   = {};        // label -> L.MarkerClusterGroup
+  var dataRanges   = {};        // label -> {smin, smax} for resizing on zoom
   var whLayers     = {};        // key   -> L.LayerGroup
 
-  function makeClusterIcon(smin, smax) {
+  // Cluster icons sized by SUM (same sizing helper)
+  function makeClusterIcon(label) {
     return function(cluster) {
       var markers = cluster.getAllChildMarkers();
       var sum = 0;
@@ -52,12 +89,12 @@
         var q = parseFloat(markers[i].options.title) || 0;
         sum += q;
       }
-      var t = tFromValue(sum, smin, smax);
-      var fill = hslGreenToRed(t, 40), border = hslGreenToRed(t, 30);
+      var rng = dataRanges[label] || { smin: 0, smax: Math.max(1, sum) };
+      var badge = sizedBadgeHTML(sum, rng.smin, rng.smax);
       return new L.DivIcon({
-        html: '<div style="background:'+fill+';border:2px solid '+border+';color:white;display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:22px;font-weight:700;">'
-              + sum.toLocaleString() + '</div>',
-        className: 'marker-cluster', iconSize: new L.Point(44,44)
+        html: badge.html,
+        className: 'marker-cluster',
+        iconSize: new L.Point(badge.size, badge.size)
       });
     };
   }
@@ -68,25 +105,29 @@
       var vals = geo.features.map(f => f.properties.qty_sum || 0);
       var smin = Math.min.apply(null, vals), smax = Math.max.apply(null, vals);
       if (!isFinite(smin) || !isFinite(smax)) { smin = 0; smax = 1; }
+      dataRanges[label] = { smin: smin, smax: smax };
 
       var cluster = L.markerClusterGroup({
         spiderfyOnMaxZoom: true,
         showCoverageOnHover: false,
         zoomToBoundsOnClick: true,
-        iconCreateFunction: makeClusterIcon(smin, smax)
+        iconCreateFunction: makeClusterIcon(label)
       });
 
       geo.features.forEach(f => {
         var q = f.properties.qty_sum || 0;
-        var t = tFromValue(q, smin, smax);
-        var fill = hslGreenToRed(t, 42);
         var lat = f.geometry.coordinates[1], lon = f.geometry.coordinates[0];
-        var dot = L.divIcon({
-          html: '<div style="width:6px;height:6px;border-radius:50%;background:'+fill+';opacity:0.9;"></div>',
-          iconSize: [6,6], iconAnchor: [3,3]
+
+        var badge = sizedBadgeHTML(q, smin, smax);
+        var icon  = L.divIcon({
+          html: badge.html,
+          iconSize: [badge.size, badge.size],
+          iconAnchor: [badge.size/2, badge.size/2],
+          className: 'qty-badge'
         });
-        var m = L.marker([lat, lon], { icon: dot, title: String(q) })
-                 .bindTooltip((q||0).toLocaleString(), { direction:'top', opacity:0.9 });
+
+        // Keep title=qty so cluster SUM logic works
+        var m = L.marker([lat, lon], { icon: icon, title: String(q) });
         cluster.addLayer(m);
       });
 
@@ -95,22 +136,43 @@
     });
   }
 
-  // --- Warehouses: pins only (robust AwesomeMarkers/PNG fallback)
+  // Resize child badges on zoom (clusters re-render automatically)
+  function updateBadgeSizes() {
+    Object.entries(dataLayers).forEach(function(entry) {
+      var label = entry[0], group = entry[1];
+      var rng = dataRanges[label] || { smin: 0, smax: 1 };
+      if (!group) return;
+      group.eachLayer(function(layer) {
+        if (layer instanceof L.Marker && layer.options && layer.options.title) {
+          var q = parseFloat(layer.options.title) || 0;
+          var badge = sizedBadgeHTML(q, rng.smin, rng.smax);
+          var icon  = L.divIcon({
+            html: badge.html,
+            iconSize: [badge.size, badge.size],
+            iconAnchor: [badge.size/2, badge.size/2],
+            className: 'qty-badge'
+          });
+          layer.setIcon(icon);
+        }
+      });
+    });
+  }
+  map.on('zoomend', updateBadgeSizes);
+
+  // --- Warehouses: pins (AwesomeMarkers/PNG fallback)
   function makeWarehouseIcon(color) {
     var hasAwesome = (typeof L.AwesomeMarkers !== 'undefined' && L.AwesomeMarkers.icon);
     if (hasAwesome) {
-      // AwesomeMarkers doesn't always support 'darkblue' — map it to 'cadetblue'
-      var mapped = (color === 'darkblue') ? 'cadetblue' : color;
+      var mapped = (color === 'darkblue') ? 'cadetblue' : color; // dark-ish blue
       return L.AwesomeMarkers.icon({
-        icon: 'building',       // Font Awesome 4.7
-        markerColor: mapped,    // 'blue' or 'cadetblue'
+        icon: 'building',
+        markerColor: mapped,
         prefix: 'fa'
       });
     } else {
-      // Fallback to colored PNGs
       var iconUrlMap = {
         blue: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png',
-        cadetblue: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-violet.png', // closest darker tone
+        cadetblue: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-violet.png',
         darkblue: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-violet.png'
       };
       return L.icon({
@@ -130,7 +192,7 @@
         var lat = f.geometry.coordinates[1], lon = f.geometry.coordinates[0];
         var name = f.properties.name || 'Warehouse';
         var pin = L.marker([lat, lon], { icon: makeWarehouseIcon(color) })
-                    .bindPopup('<b>Warehouse:</b> ' + name);
+                   .bindPopup('<b>Warehouse:</b> ' + name);
         g.addLayer(pin);
       });
       whLayers[key] = g;
