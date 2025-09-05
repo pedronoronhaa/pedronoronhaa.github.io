@@ -1,1 +1,1 @@
-{"type":"FeatureCollection","features":[]}
+{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[-9.16057240912521,39.2619883390681]},"properties":{"name":"Bombarral"}},{"type":"Feature","geometry":{"type":"Point","coordinates":[-8.432405094358579,40.216826585620026]},"properties":{"name":"Coimbra"}},{"type":"Feature","geometry":{"type":"Point","coordinates":[-8.901438620741494,38.57584851988338]},"properties":{"name":"Palmela"}}]}

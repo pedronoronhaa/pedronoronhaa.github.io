@@ -7,6 +7,9 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.css"/>
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css"/>
+<!-- AwesomeMarkers + Font Awesome for colored warehouse pins -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.awesome-markers/2.0.4/leaflet.awesome-markers.css"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css"/>
 <style>
   html, body, #map { height: 100%; margin: 0; }
   .leaflet-control-layers-overlays label { font-weight: 500; }
@@ -17,6 +20,7 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.awesome-markers/2.0.4/leaflet.awesome-markers.js"></script>
 <script>
   // --- Base map
   var map = L.map('map', { zoomControl: true }).setView([39.5, -8.0], 6);
@@ -31,14 +35,14 @@
     return Math.max(0, Math.min(1, t));
   }
   function hslGreenToRed(t, lightness) {
-    var hue = 120 * (1 - t);
+    var hue = 120 * (1 - t);                 // 120=green -> 0=red
     return 'hsl(' + hue.toFixed(0) + ',70%,' + (lightness||40) + '%)';
   }
 
   // --- Lazy layers
-  var datasetFiles = {"Nov 2024": "nov_2024.json", "Dec 2024": "dec_2024.json", "Jul 2025": "jul_2025.json"};  // label -> json file
-  var layers = {};             // label -> L.LayerGroup/Cluster
-  var warehousesLayers = {};
+  var datasetFiles = {"Nov 2024": "nov_2024.json", "Dec 2024": "dec_2024.json", "Jul 2025": "jul_2025.json"};   // label -> json file
+  var dataLayers   = {};        // label -> L.MarkerClusterGroup
+  var whLayers     = {};        // key   -> L.LayerGroup
 
   function makeClusterIcon(smin, smax) {
     return function(cluster) {
@@ -49,19 +53,18 @@
         sum += q;
       }
       var t = tFromValue(sum, smin, smax);
-      var fill = hslGreenToRed(t, 40);
-      var border = hslGreenToRed(t, 30);
+      var fill = hslGreenToRed(t, 40), border = hslGreenToRed(t, 30);
       return new L.DivIcon({
-        html: '<div style="background:'+fill+';border:2px solid '+border+';color:white;display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:22px;font-weight:700;">'+ sum.toLocaleString() +'</div>',
+        html: '<div style="background:'+fill+';border:2px solid '+border+';color:white;display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:22px;font-weight:700;">'
+              + sum.toLocaleString() + '</div>',
         className: 'marker-cluster', iconSize: new L.Point(44,44)
       });
     };
   }
 
   function loadDataset(label, url) {
-    if (layers[label]) { map.addLayer(layers[label]); return; }
+    if (dataLayers[label]) { map.addLayer(dataLayers[label]); return; }
     fetch(url).then(r => r.json()).then(geo => {
-      // compute min/max for gradient coloring
       var vals = geo.features.map(f => f.properties.qty_sum || 0);
       var smin = Math.min.apply(null, vals), smax = Math.max.apply(null, vals);
       if (!isFinite(smin) || !isFinite(smax)) { smin = 0; smax = 1; }
@@ -73,7 +76,6 @@
         iconCreateFunction: makeClusterIcon(smin, smax)
       });
 
-      // add one colored dot per grid cell
       geo.features.forEach(f => {
         var q = f.properties.qty_sum || 0;
         var t = tFromValue(q, smin, smax);
@@ -81,72 +83,92 @@
         var lat = f.geometry.coordinates[1], lon = f.geometry.coordinates[0];
         var dot = L.divIcon({
           html: '<div style="width:6px;height:6px;border-radius:50%;background:'+fill+';opacity:0.9;"></div>',
-          iconSize: [6,6],
-          iconAnchor: [3,3]
+          iconSize: [6,6], iconAnchor: [3,3]
         });
         var m = L.marker([lat, lon], { icon: dot, title: String(q) })
-          .bindTooltip((q||0).toLocaleString(), { direction: 'top', opacity: 0.9 });
+                 .bindTooltip((q||0).toLocaleString(), { direction:'top', opacity:0.9 });
         cluster.addLayer(m);
       });
 
-      layers[label] = cluster;
+      dataLayers[label] = cluster;
       map.addLayer(cluster);
     });
   }
 
+  // --- Warehouses: pins only (robust AwesomeMarkers/PNG fallback)
+  function makeWarehouseIcon(color) {
+    var hasAwesome = (typeof L.AwesomeMarkers !== 'undefined' && L.AwesomeMarkers.icon);
+    if (hasAwesome) {
+      // AwesomeMarkers doesn't always support 'darkblue' — map it to 'cadetblue'
+      var mapped = (color === 'darkblue') ? 'cadetblue' : color;
+      return L.AwesomeMarkers.icon({
+        icon: 'building',       // Font Awesome 4.7
+        markerColor: mapped,    // 'blue' or 'cadetblue'
+        prefix: 'fa'
+      });
+    } else {
+      // Fallback to colored PNGs
+      var iconUrlMap = {
+        blue: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png',
+        cadetblue: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-violet.png', // closest darker tone
+        darkblue: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-violet.png'
+      };
+      return L.icon({
+        iconUrl: iconUrlMap[color] || iconUrlMap.blue,
+        shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
+        iconSize: [25,41], iconAnchor: [12,41],
+        popupAnchor: [1,-34], shadowSize: [41,41]
+      });
+    }
+  }
+
   function loadWarehouses(url, color, key) {
-    if (warehousesLayers[key]) { map.addLayer(warehousesLayers[key]); return; }
+    if (whLayers[key]) { map.addLayer(whLayers[key]); return; }
     fetch(url).then(r => r.json()).then(geo => {
       var g = L.layerGroup();
       geo.features.forEach(f => {
         var lat = f.geometry.coordinates[1], lon = f.geometry.coordinates[0];
         var name = f.properties.name || 'Warehouse';
-        var mk = L.marker([lat, lon], {
-          icon: L.icon({
-            iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png', // fallback, color via default Icon colors not trivial, so use blue/darkblue via CSS filter
-            iconSize: [25,41],
-            iconAnchor: [12,41],
-            popupAnchor: [1,-34],
-            shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
-            shadowSize: [41,41]
-          })
-        }).bindPopup('<b>Warehouse:</b> ' + name);
-        // quick color tint using a colored circle underlay
-        var circle = L.circleMarker([lat, lon], { radius: 10, color: color, weight: 2, fillColor: color, fillOpacity: 0.2 });
-        g.addLayer(circle);
-        g.addLayer(mk);
+        var pin = L.marker([lat, lon], { icon: makeWarehouseIcon(color) })
+                    .bindPopup('<b>Warehouse:</b> ' + name);
+        g.addLayer(pin);
       });
-      warehousesLayers[key] = g;
+      whLayers[key] = g;
       map.addLayer(g);
     });
   }
 
-  // --- Layer control (warehouses ON by default, datasets OFF)
+  // --- Layer control (everything OFF by default)
   var overlays = {
     "Warehouses": L.layerGroup(),
-    "New Warehouses": L.layerGroup(){
-      }
+    "New Warehouses": L.layerGroup()
   };
-  // add dataset placeholders
-  Object.keys(datasetFiles).forEach(lbl => overlays[lbl] = L.layerGroup());
+  Object.keys(datasetFiles).forEach(function(lbl) { overlays[lbl] = L.layerGroup(); });
 
-  L.control.layers(null, overlays, { collapsed: false }).addTo(map);
+  var control = L.control.layers(null, overlays, { collapsed: false }).addTo(map);
 
-  // Start with warehouses visible
-  loadWarehouses('warehouses_existing.json', 'blue', 'existing');
-
-  // Hook layer toggles
-  map.on('overlayadd', function(e) {
-    var name = e.name;
-    if (name === 'Warehouses') loadWarehouses('warehouses_existing.json', 'blue', 'existing');
-    else if (name === 'New Warehouses') loadWarehouses('warehouses_new.json', 'darkblue', 'new');
-    else if (datasetFiles[name]) loadDataset(name, datasetFiles[name]);
+  // tag each overlay with its label so we can detect which was toggled
+  Object.entries(overlays).forEach(function(entry) {
+    var lbl = entry[0], lg = entry[1];
+    lg._label = lbl;
   });
+
+  map.on('overlayadd', function(e) {
+    var lbl = e.layer._label;
+    if (lbl === 'Warehouses') {
+      loadWarehouses('warehouses_existing.json', 'blue', 'existing');
+    } else if (lbl === 'New Warehouses') {
+      loadWarehouses('warehouses_new.json', 'darkblue', 'new');
+    } else if (datasetFiles[lbl]) {
+      loadDataset(lbl, datasetFiles[lbl]);
+    }
+  });
+
   map.on('overlayremove', function(e) {
-    var name = e.name;
-    if (name === 'Warehouses' && warehousesLayers['existing']) map.removeLayer(warehousesLayers['existing']);
-    else if (name === 'New Warehouses' && warehousesLayers['new']) map.removeLayer(warehousesLayers['new']);
-    else if (layers[name]) map.removeLayer(layers[name]);
+    var lbl = e.layer._label;
+    if (lbl === 'Warehouses' && whLayers['existing']) map.removeLayer(whLayers['existing']);
+    else if (lbl === 'New Warehouses' && whLayers['new']) map.removeLayer(whLayers['new']);
+    else if (dataLayers[lbl]) map.removeLayer(dataLayers[lbl]);
   });
 </script>
 </body>
